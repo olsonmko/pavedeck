@@ -159,7 +159,9 @@ function saveState() {
       inventory: state.inventory,
       config: state.config,
       photoEdits: state.photoEdits || {},
-      photosUI: state.photosUI || {}
+      photosUI: state.photosUI || {},
+      pricingUI: state.pricingUI || {},
+      autoPricing: state.autoPricing || null
     }));
   } catch (e) {
     console.warn('Failed to save state', e);
@@ -279,7 +281,8 @@ function render() {
     root.innerHTML = renderSimplePage('VDPs', 'AI-generated vehicle description pages. Configure dealership voice and review per-channel output.');
   } else if (state.route.name === 'pricing') {
     crumb.innerHTML = '<span class="crumb-current">Pricing</span>';
-    root.innerHTML = renderSimplePage('Pricing intelligence', 'Live market comps from MarketCheck and Black Book. Surfaces pricing recommendations across your inventory.');
+    root.innerHTML = renderPricingBucket();
+    bindPricingBucketEvents();
   } else if (state.route.name === 'integrations') {
     crumb.innerHTML = '<span class="crumb-current">Integrations</span>';
     root.innerHTML = renderIntegrationsPage();
@@ -1503,6 +1506,668 @@ function closePhotoEditor() {
     document.getElementById('page-root').innerHTML = renderPhotosBucket();
     bindPhotosBucketEvents();
   }
+}
+
+// ============================================
+// PRICING BUCKET — dealer-wide dashboard, comp explorer, auto-pricing
+// ============================================
+
+function ensurePricingState() {
+  if (!state.pricingUI) state.pricingUI = { tab: 'opportunities', filter: 'all', selectedVid: null, geoLevel: 'metro' };
+  if (!state.autoPricing) state.autoPricing = {
+    enabled: false,
+    rules: {
+      reduceWhenStale: { enabled: true, daysThreshold: 30, maxReductionPct: 5 },
+      raiseWhenUnder:  { enabled: false, belowMarketPct: 5 },
+      maxAdjustPerWeek: 500,
+      marginFloorPct: 8,
+    },
+    history: [],
+  };
+}
+
+function getPricingSummary() {
+  const inv = state.inventory;
+  let totalValue = 0;
+  let aboveMarket = 0;
+  let atMarket = 0;
+  let belowMarket = 0;
+  let totalOpportunity = 0;
+  let staleCount = 0;
+  const opportunities = [];
+
+  inv.forEach(v => {
+    totalValue += v.price;
+    // Skip vehicles with no pricing data (drafts) — count separately
+    if (!v.pricing) {
+      if (v.daysOnLot >= 30) staleCount++;
+      return;
+    }
+    const mid = (v.pricing.rangeLow + v.pricing.rangeHigh) / 2;
+    let bucket;
+    let recommendedPrice = v.price;
+    let opportunity = 0;
+    let action = 'hold';
+    let reason = 'Within market range';
+
+    if (v.price > v.pricing.rangeHigh) {
+      bucket = 'above';
+      aboveMarket++;
+      recommendedPrice = Math.round(mid / 100) * 100;
+      opportunity = v.price - recommendedPrice;
+      action = 'reduce';
+      reason = `Priced $${(v.price - v.pricing.rangeHigh).toLocaleString()} over market ceiling`;
+    } else if (v.price < v.pricing.rangeLow) {
+      bucket = 'below';
+      belowMarket++;
+      recommendedPrice = Math.round(mid / 100) * 100;
+      opportunity = recommendedPrice - v.price;
+      action = 'raise';
+      reason = `Underpriced — leaving $${opportunity.toLocaleString()} on the table`;
+    } else {
+      bucket = 'at';
+      atMarket++;
+      if (v.daysOnLot >= 30) {
+        recommendedPrice = Math.round((mid * 0.97) / 100) * 100;
+        opportunity = v.price - recommendedPrice;
+        action = 'reduce';
+        reason = `Stale (${v.daysOnLot}d) — strategic reduction`;
+      }
+    }
+
+    if (v.daysOnLot >= 30) staleCount++;
+
+    if (action !== 'hold') {
+      opportunities.push({
+        vid: v.id, year: v.year, vehicle: v.vehicle, vin: v.vin,
+        currentPrice: v.price, recommendedPrice, opportunity, action,
+        reason, daysOnLot: v.daysOnLot, bucket,
+        marketLow: v.pricing.rangeLow, marketHigh: v.pricing.rangeHigh,
+      });
+      if (action === 'reduce') totalOpportunity += opportunity;
+    }
+  });
+
+  opportunities.sort((a, b) => b.opportunity - a.opportunity);
+
+  return {
+    totalValue, totalOpportunity, staleCount,
+    aboveMarket, atMarket, belowMarket,
+    inventoryCount: inv.length,
+    opportunities,
+  };
+}
+
+// Generate deterministic comp data per vehicle + geo level
+function generateComps(v, level) {
+  const seed = v.vin.split('').reduce((a, c) => a + c.charCodeAt(0), 0) + level.length;
+  const rand = (i) => {
+    const x = Math.sin(seed + i * 17.3) * 10000;
+    return x - Math.floor(x);
+  };
+  const cities = {
+    zip:   ['San Mateo', 'San Mateo', 'San Mateo', 'Foster City'],
+    metro: ['San Mateo', 'Foster City', 'Burlingame', 'Belmont', 'Redwood City', 'San Carlos', 'San Bruno'],
+    state: ['Sacramento', 'Fresno', 'San Diego', 'Los Angeles', 'San Jose', 'Oakland', 'Bakersfield', 'Riverside', 'Stockton', 'Anaheim', 'Long Beach', 'Santa Rosa'],
+  }[level];
+  const count = { zip: 4, metro: 7, state: 12 }[level];
+  const baseM = (v.pricing.rangeLow + v.pricing.rangeHigh) / 2;
+  const spread = (v.pricing.rangeHigh - v.pricing.rangeLow) * 0.7;
+  return Array.from({ length: count }, (_, i) => {
+    const r1 = rand(i);
+    const r2 = rand(i * 3 + 7);
+    const offset = (r1 - 0.5) * spread;
+    const milesOffset = Math.round((r2 - 0.5) * 28000);
+    return {
+      city: cities[i % cities.length],
+      miles: Math.max(8000, v.mileage + milesOffset),
+      price: Math.round((baseM + offset) / 100) * 100,
+    };
+  }).sort((a, b) => a.price - b.price);
+}
+
+function renderPricingBucket() {
+  ensurePricingState();
+  const tab = state.pricingUI.tab || 'opportunities';
+
+  return `
+    <div class="page">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Pricing intelligence</div>
+          <div class="page-sub">Live market comps from MarketCheck and Black Book. Inventory-wide pricing opportunities, refreshed weekly.</div>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-ghost btn-sm" id="pr-refresh">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+            Refresh comps
+          </button>
+        </div>
+      </div>
+
+      <div class="pr-tabs">
+        <button class="pr-tab ${tab === 'opportunities' ? 'active' : ''}" data-pr-tab="opportunities">
+          Opportunities
+        </button>
+        <button class="pr-tab ${tab === 'comps' ? 'active' : ''}" data-pr-tab="comps">
+          Comp explorer
+        </button>
+        <button class="pr-tab ${tab === 'auto' ? 'active' : ''}" data-pr-tab="auto">
+          Auto-pricing
+          ${state.autoPricing.enabled ? '<span class="pr-tab-on">ON</span>' : ''}
+        </button>
+      </div>
+
+      <div class="pr-tab-body">
+        ${tab === 'opportunities' ? renderPricingOpportunitiesTab() : ''}
+        ${tab === 'comps' ? renderPricingCompsTab() : ''}
+        ${tab === 'auto' ? renderPricingAutoTab() : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderPricingOpportunitiesTab() {
+  const s = getPricingSummary();
+  const filter = state.pricingUI.filter || 'all';
+  const filtered = filter === 'all' ? s.opportunities : s.opportunities.filter(o => o.action === filter);
+  const counts = {
+    all: s.opportunities.length,
+    reduce: s.opportunities.filter(o => o.action === 'reduce').length,
+    raise: s.opportunities.filter(o => o.action === 'raise').length,
+  };
+
+  return `
+    <div class="pr-stats">
+      <div class="pr-stat">
+        <div class="pr-stat-label">Inventory value</div>
+        <div class="pr-stat-num">$${(s.totalValue / 1000).toFixed(0)}<span class="pr-stat-suffix">K</span></div>
+        <div class="pr-stat-sub">${s.inventoryCount} active VINs</div>
+      </div>
+      <div class="pr-stat pr-stat-feature">
+        <div class="pr-stat-label">Pricing opportunity</div>
+        <div class="pr-stat-num">$${(s.totalOpportunity / 1000).toFixed(1)}<span class="pr-stat-suffix">K</span></div>
+        <div class="pr-stat-sub">Sum of recommended reductions</div>
+      </div>
+      <div class="pr-stat">
+        <div class="pr-stat-label">Above market</div>
+        <div class="pr-stat-num">${s.aboveMarket}</div>
+        <div class="pr-stat-sub">${s.atMarket} at · ${s.belowMarket} below</div>
+      </div>
+      <div class="pr-stat">
+        <div class="pr-stat-label">Stale (30d+)</div>
+        <div class="pr-stat-num" style="color: ${s.staleCount > 0 ? 'var(--warn)' : 'var(--fg)'};">${s.staleCount}</div>
+        <div class="pr-stat-sub">VINs needing attention</div>
+      </div>
+    </div>
+
+    <div class="pr-filters">
+      <button class="filter-pill ${filter === 'all' ? 'active' : ''}" data-pr-filter="all">All <span class="pill-count">${counts.all}</span></button>
+      <button class="filter-pill ${filter === 'reduce' ? 'active' : ''}" data-pr-filter="reduce">Reduce <span class="pill-count">${counts.reduce}</span></button>
+      <button class="filter-pill ${filter === 'raise' ? 'active' : ''}" data-pr-filter="raise">Raise <span class="pill-count">${counts.raise}</span></button>
+      <div style="flex: 1;"></div>
+      <span class="pr-filter-sub">Sorted by $ impact</span>
+    </div>
+
+    <div class="pr-opp-table">
+      <div class="pr-opp-row pr-opp-head">
+        <span>Vehicle</span>
+        <span>Days</span>
+        <span>Current</span>
+        <span>Recommended</span>
+        <span>Δ</span>
+        <span>Reason</span>
+        <span></span>
+      </div>
+      ${filtered.length === 0 ? `
+        <div class="pr-opp-empty">No vehicles match this filter. Inventory is well-priced.</div>
+      ` : filtered.map(o => `
+        <div class="pr-opp-row" data-vid="${o.vid}">
+          <span class="pr-opp-vehicle">
+            <div class="pr-opp-name">${escapeHtml(o.year + ' ' + o.vehicle)}</div>
+            <div class="pr-opp-vin">${o.vin.slice(0, 5)}***${o.vin.slice(-4)}</div>
+          </span>
+          <span class="pr-opp-days ${o.daysOnLot >= 30 ? 'stale' : ''}">${o.daysOnLot}d</span>
+          <span class="pr-opp-price">$${o.currentPrice.toLocaleString()}</span>
+          <span class="pr-opp-rec ${o.action}">$${o.recommendedPrice.toLocaleString()}</span>
+          <span class="pr-opp-delta ${o.action}">
+            ${o.action === 'reduce' ? '−' : '+'}$${Math.abs(o.opportunity).toLocaleString()}
+          </span>
+          <span class="pr-opp-reason">${escapeHtml(o.reason)}</span>
+          <span class="pr-opp-act">
+            <button class="btn btn-primary btn-xs" data-apply-vid="${o.vid}" data-apply-price="${o.recommendedPrice}">
+              Apply
+            </button>
+          </span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderPricingCompsTab() {
+  ensurePricingState();
+  // Default to first vehicle WITH pricing data
+  const validInv = state.inventory.filter(v => v.pricing);
+  if (validInv.length === 0) {
+    return `<div class="pr-opp-empty">No vehicles with pricing data yet. Add VINs from the inventory page.</div>`;
+  }
+  let selectedVid = state.pricingUI.selectedVid;
+  let v = state.inventory.find(x => x.id === selectedVid);
+  if (!v || !v.pricing) {
+    v = validInv[0];
+    selectedVid = v.id;
+  }
+  const level = state.pricingUI.geoLevel || 'metro';
+  const comps = generateComps(v, level);
+  const median = comps[Math.floor(comps.length / 2)].price;
+  const min = comps[0].price;
+  const max = comps[comps.length - 1].price;
+  const yourPos = ((v.price - min) / (max - min)) * 100;
+
+  return `
+    <div class="pr-comp-layout">
+      <!-- LEFT: vehicle picker -->
+      <div class="pr-comp-picker">
+        <div class="pr-section-label">Vehicle</div>
+        <select id="pr-comp-vehicle" class="pr-select">
+          ${validInv.map(iv => `
+            <option value="${iv.id}" ${iv.id === selectedVid ? 'selected' : ''}>
+              ${iv.year} ${iv.vehicle}
+            </option>
+          `).join('')}
+        </select>
+
+        <div class="pr-section-label" style="margin-top: 22px;">Geographic radius</div>
+        <div class="pr-geo-toggle">
+          ${['zip','metro','state'].map(lv => `
+            <button class="pr-geo-btn ${lv === level ? 'active' : ''}" data-geo="${lv}">
+              ${lv === 'zip' ? 'ZIP' : lv === 'metro' ? 'Metro' : 'State'}
+              <span class="pr-geo-count">${lv === 'zip' ? '4' : lv === 'metro' ? '7' : '12'}</span>
+            </button>
+          `).join('')}
+        </div>
+
+        <div class="pr-vehicle-card">
+          <div class="pr-vehicle-line"><span>Your price</span><strong>$${v.price.toLocaleString()}</strong></div>
+          <div class="pr-vehicle-line"><span>Mileage</span><strong>${v.mileage.toLocaleString()} mi</strong></div>
+          <div class="pr-vehicle-line"><span>Days on lot</span><strong>${v.daysOnLot}d</strong></div>
+        </div>
+
+        <div class="pr-data-source">
+          <span class="pr-data-dot" style="background: var(--accent);"></span> MarketCheck<br>
+          <span class="pr-data-dot" style="background: #1E40AF;"></span> Kelley Blue Book<br>
+          <span class="pr-data-dot" style="background: #0C0A09;"></span> Black Book<br>
+          <span class="pr-data-meta">Last refresh · 4 hours ago</span>
+        </div>
+      </div>
+
+      <!-- RIGHT: comp display -->
+      <div class="pr-comp-display">
+        <div class="pr-comp-summary">
+          <div>
+            <div class="pr-section-label">Market position · ${comps.length} comps in ${level}</div>
+            <div class="pr-comp-stats">
+              <div class="pr-comp-stat"><div class="pr-comp-stat-num">$${(min/1000).toFixed(1)}K</div><div class="pr-comp-stat-label">Low</div></div>
+              <div class="pr-comp-stat"><div class="pr-comp-stat-num">$${(median/1000).toFixed(1)}K</div><div class="pr-comp-stat-label">Median</div></div>
+              <div class="pr-comp-stat"><div class="pr-comp-stat-num">$${(max/1000).toFixed(1)}K</div><div class="pr-comp-stat-label">High</div></div>
+              <div class="pr-comp-stat"><div class="pr-comp-stat-num ${v.price > median ? 'over' : 'under'}">${v.price > median ? '+' : ''}$${Math.abs(v.price - median).toLocaleString()}</div><div class="pr-comp-stat-label">vs. Median</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pr-comp-bar-wrap">
+          <div class="pr-comp-bar">
+            <div class="pr-comp-bar-track"></div>
+            ${comps.map(c => {
+              const pos = ((c.price - min) / Math.max(1, max - min)) * 100;
+              return `<div class="pr-comp-tick" style="left: ${pos}%;" title="$${c.price.toLocaleString()}"></div>`;
+            }).join('')}
+            <div class="pr-comp-marker" style="left: ${yourPos}%;">
+              <div class="pr-comp-marker-line"></div>
+              <div class="pr-comp-marker-label">You · $${v.price.toLocaleString()}</div>
+            </div>
+          </div>
+          <div class="pr-comp-bar-axis">
+            <span>$${(min/1000).toFixed(1)}K</span>
+            <span>$${(max/1000).toFixed(1)}K</span>
+          </div>
+        </div>
+
+        <div class="pr-comp-table">
+          <div class="pr-comp-row pr-comp-head">
+            <span>Location</span>
+            <span>Mileage</span>
+            <span>Price</span>
+            <span>vs. You</span>
+          </div>
+          ${comps.map(c => {
+            const delta = c.price - v.price;
+            return `
+              <div class="pr-comp-row">
+                <span>${escapeHtml(c.city)}</span>
+                <span class="pr-comp-mi">${c.miles.toLocaleString()} mi</span>
+                <span class="pr-comp-pr">$${c.price.toLocaleString()}</span>
+                <span class="pr-comp-delta ${delta < 0 ? 'lower' : 'higher'}">${delta < 0 ? '−' : '+'}$${Math.abs(delta).toLocaleString()}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPricingAutoTab() {
+  const ap = state.autoPricing;
+  return `
+    <div class="pr-auto">
+      <div class="pr-auto-master">
+        <div class="pr-auto-master-text">
+          <div class="pr-auto-title">Auto-pricing engine</div>
+          <div class="pr-auto-sub">When enabled, Pavedeck applies pricing rules automatically based on the conditions you set below. Off by default — most dealers want manager approval.</div>
+        </div>
+        <label class="pr-toggle ${ap.enabled ? 'on' : ''}">
+          <input type="checkbox" id="pr-auto-master" ${ap.enabled ? 'checked' : ''} hidden>
+          <span class="pr-toggle-track"><span class="pr-toggle-knob"></span></span>
+          <span class="pr-toggle-label">${ap.enabled ? 'Enabled' : 'Disabled'}</span>
+        </label>
+      </div>
+
+      <div class="pr-rules ${ap.enabled ? '' : 'pr-rules-dim'}">
+
+        <div class="pr-rule">
+          <div class="pr-rule-head">
+            <label class="pr-toggle pr-toggle-sm ${ap.rules.reduceWhenStale.enabled ? 'on' : ''}">
+              <input type="checkbox" id="pr-rule-stale" ${ap.rules.reduceWhenStale.enabled ? 'checked' : ''} hidden>
+              <span class="pr-toggle-track"><span class="pr-toggle-knob"></span></span>
+            </label>
+            <div>
+              <div class="pr-rule-title">Reduce price when stale</div>
+              <div class="pr-rule-desc">Auto-reduce vehicles sitting longer than the threshold, capped by max-reduction percentage.</div>
+            </div>
+          </div>
+          <div class="pr-rule-body">
+            <div class="pr-rule-input">
+              <label>Days on lot threshold</label>
+              <div class="pr-num-input">
+                <input type="number" id="pr-stale-days" value="${ap.rules.reduceWhenStale.daysThreshold}" min="7" max="120">
+                <span class="pr-num-suffix">days</span>
+              </div>
+            </div>
+            <div class="pr-rule-input">
+              <label>Max reduction</label>
+              <div class="pr-num-input">
+                <input type="number" id="pr-stale-pct" value="${ap.rules.reduceWhenStale.maxReductionPct}" min="1" max="20" step="0.5">
+                <span class="pr-num-suffix">%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pr-rule">
+          <div class="pr-rule-head">
+            <label class="pr-toggle pr-toggle-sm ${ap.rules.raiseWhenUnder.enabled ? 'on' : ''}">
+              <input type="checkbox" id="pr-rule-raise" ${ap.rules.raiseWhenUnder.enabled ? 'checked' : ''} hidden>
+              <span class="pr-toggle-track"><span class="pr-toggle-knob"></span></span>
+            </label>
+            <div>
+              <div class="pr-rule-title">Raise underpriced vehicles</div>
+              <div class="pr-rule-desc">When current price is below the market range, auto-raise to the market median.</div>
+            </div>
+          </div>
+          <div class="pr-rule-body">
+            <div class="pr-rule-input">
+              <label>Trigger when below market by</label>
+              <div class="pr-num-input">
+                <input type="number" id="pr-raise-pct" value="${ap.rules.raiseWhenUnder.belowMarketPct}" min="1" max="20" step="0.5">
+                <span class="pr-num-suffix">%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pr-rule pr-rule-global">
+          <div class="pr-rule-title">Global guardrails</div>
+          <div class="pr-rule-body">
+            <div class="pr-rule-input">
+              <label>Max adjustment per vehicle per week</label>
+              <div class="pr-num-input">
+                <input type="number" id="pr-max-adjust" value="${ap.rules.maxAdjustPerWeek}" min="100" step="100">
+                <span class="pr-num-suffix">$</span>
+              </div>
+            </div>
+            <div class="pr-rule-input">
+              <label>Margin floor (won't drop below)</label>
+              <div class="pr-num-input">
+                <input type="number" id="pr-margin-floor" value="${ap.rules.marginFloorPct}" min="3" max="25" step="0.5">
+                <span class="pr-num-suffix">%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="pr-auto-preview">
+        <div class="pr-section-label">Dry run · what would happen now</div>
+        ${renderAutoPricingPreview()}
+      </div>
+
+      <div class="pr-auto-history">
+        <div class="pr-section-label">Recent auto-adjustments</div>
+        ${ap.history.length === 0 ? `
+          <div class="pr-history-empty">No auto-adjustments yet. Enable above to start.</div>
+        ` : `
+          <div class="pr-history-list">
+            ${ap.history.slice(0, 10).map(h => `
+              <div class="pr-history-row">
+                <span class="pr-history-time">${h.when}</span>
+                <span class="pr-history-vehicle">${escapeHtml(h.vehicle)}</span>
+                <span class="pr-history-action">${h.action === 'reduce' ? '−' : '+'}$${h.amount.toLocaleString()}</span>
+                <span class="pr-history-reason">${escapeHtml(h.reason)}</span>
+              </div>
+            `).join('')}
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+function renderAutoPricingPreview() {
+  const ap = state.autoPricing;
+  const previews = [];
+  state.inventory.forEach(v => {
+    if (!v.pricing) return;
+    const mid = (v.pricing.rangeLow + v.pricing.rangeHigh) / 2;
+    if (ap.rules.reduceWhenStale.enabled && v.daysOnLot >= ap.rules.reduceWhenStale.daysThreshold) {
+      const maxReduction = v.price * (ap.rules.reduceWhenStale.maxReductionPct / 100);
+      const targetReduction = Math.min(maxReduction, ap.rules.maxAdjustPerWeek, Math.max(0, v.price - mid));
+      if (targetReduction > 100) {
+        const newPrice = Math.round((v.price - targetReduction) / 100) * 100;
+        previews.push({ vehicle: `${v.year} ${v.vehicle}`, action: 'reduce', from: v.price, to: newPrice, reason: `Stale ${v.daysOnLot}d` });
+      }
+    }
+    if (ap.rules.raiseWhenUnder.enabled && v.price < v.pricing.rangeLow) {
+      const target = Math.min(mid, v.price + ap.rules.maxAdjustPerWeek);
+      const newPrice = Math.round(target / 100) * 100;
+      if (newPrice > v.price + 100) {
+        previews.push({ vehicle: `${v.year} ${v.vehicle}`, action: 'raise', from: v.price, to: newPrice, reason: 'Underpriced vs. market' });
+      }
+    }
+  });
+
+  if (previews.length === 0) {
+    return `<div class="pr-preview-empty">No adjustments would be made with current rules.</div>`;
+  }
+
+  return `
+    <div class="pr-preview-list">
+      ${previews.map(p => `
+        <div class="pr-preview-row">
+          <span class="pr-preview-vehicle">${escapeHtml(p.vehicle)}</span>
+          <span class="pr-preview-from">$${p.from.toLocaleString()}</span>
+          <span class="pr-preview-arrow">→</span>
+          <span class="pr-preview-to ${p.action}">$${p.to.toLocaleString()}</span>
+          <span class="pr-preview-delta ${p.action}">${p.action === 'reduce' ? '−' : '+'}$${Math.abs(p.to - p.from).toLocaleString()}</span>
+          <span class="pr-preview-reason">${escapeHtml(p.reason)}</span>
+        </div>
+      `).join('')}
+    </div>
+    ${state.autoPricing.enabled ? `
+      <button class="btn btn-primary btn-sm" id="pr-run-auto" style="margin-top: 12px;">
+        Apply ${previews.length} ${previews.length === 1 ? 'adjustment' : 'adjustments'} now
+      </button>
+    ` : `
+      <div class="pr-preview-disabled">Enable auto-pricing above to apply these adjustments.</div>
+    `}
+  `;
+}
+
+function bindPricingBucketEvents() {
+  // Tab switching
+  document.querySelectorAll('[data-pr-tab]').forEach(b => {
+    b.addEventListener('click', () => {
+      state.pricingUI.tab = b.dataset.prTab;
+      saveState();
+      const root = document.getElementById('page-root');
+      root.innerHTML = renderPricingBucket();
+      bindPricingBucketEvents();
+    });
+  });
+
+  // Refresh comps
+  document.getElementById('pr-refresh')?.addEventListener('click', () => {
+    toast('Pulling live comps from MarketCheck…');
+    setTimeout(() => toast('Pricing refreshed · 24 new comps'), 900);
+  });
+
+  // === Opportunities tab events ===
+  document.querySelectorAll('[data-pr-filter]').forEach(b => {
+    b.addEventListener('click', () => {
+      state.pricingUI.filter = b.dataset.prFilter;
+      saveState();
+      refreshPricingTab();
+    });
+  });
+  document.querySelectorAll('.pr-opp-row[data-vid]').forEach(r => {
+    r.addEventListener('click', (e) => {
+      if (e.target.tagName === 'BUTTON') return;
+      const vid = r.dataset.vid;
+      navigate('vehicle', { id: vid });
+    });
+  });
+  document.querySelectorAll('[data-apply-vid]').forEach(b => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const vid = b.dataset.applyVid;
+      const newPrice = parseInt(b.dataset.applyPrice);
+      const v = state.inventory.find(x => x.id === vid);
+      if (!v) return;
+      const oldPrice = v.price;
+      v.price = newPrice;
+      saveState();
+      refreshPricingTab();
+      toast(`${v.year} ${v.vehicle} repriced to $${newPrice.toLocaleString()}`);
+    });
+  });
+
+  // === Comp explorer events ===
+  document.getElementById('pr-comp-vehicle')?.addEventListener('change', (e) => {
+    state.pricingUI.selectedVid = e.target.value;
+    saveState();
+    refreshPricingTab();
+  });
+  document.querySelectorAll('[data-geo]').forEach(b => {
+    b.addEventListener('click', () => {
+      state.pricingUI.geoLevel = b.dataset.geo;
+      saveState();
+      refreshPricingTab();
+    });
+  });
+
+  // === Auto-pricing events ===
+  document.getElementById('pr-auto-master')?.addEventListener('change', (e) => {
+    state.autoPricing.enabled = e.target.checked;
+    saveState();
+    refreshPricingTab();
+    toast(state.autoPricing.enabled ? 'Auto-pricing enabled' : 'Auto-pricing disabled');
+  });
+  document.getElementById('pr-rule-stale')?.addEventListener('change', (e) => {
+    state.autoPricing.rules.reduceWhenStale.enabled = e.target.checked;
+    saveState();
+    refreshPricingTab();
+  });
+  document.getElementById('pr-rule-raise')?.addEventListener('change', (e) => {
+    state.autoPricing.rules.raiseWhenUnder.enabled = e.target.checked;
+    saveState();
+    refreshPricingTab();
+  });
+  ['pr-stale-days','pr-stale-pct','pr-raise-pct','pr-max-adjust','pr-margin-floor'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      const v = parseFloat(el.value);
+      if (id === 'pr-stale-days') state.autoPricing.rules.reduceWhenStale.daysThreshold = v;
+      if (id === 'pr-stale-pct') state.autoPricing.rules.reduceWhenStale.maxReductionPct = v;
+      if (id === 'pr-raise-pct') state.autoPricing.rules.raiseWhenUnder.belowMarketPct = v;
+      if (id === 'pr-max-adjust') state.autoPricing.rules.maxAdjustPerWeek = v;
+      if (id === 'pr-margin-floor') state.autoPricing.rules.marginFloorPct = v;
+      saveState();
+      // Refresh just the preview to keep input focus
+      const wrap = document.querySelector('.pr-auto-preview');
+      if (wrap) {
+        const sec = wrap.querySelector('.pr-section-label');
+        wrap.innerHTML = '';
+        wrap.appendChild(sec);
+        const div = document.createElement('div');
+        div.innerHTML = renderAutoPricingPreview();
+        Array.from(div.children).forEach(c => wrap.appendChild(c));
+        // Re-bind apply button
+        document.getElementById('pr-run-auto')?.addEventListener('click', applyAutoPricingNow);
+      }
+    });
+  });
+  document.getElementById('pr-run-auto')?.addEventListener('click', applyAutoPricingNow);
+}
+
+function applyAutoPricingNow() {
+  const ap = state.autoPricing;
+  let applied = 0;
+  const now = new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  state.inventory.forEach(v => {
+    if (!v.pricing) return;
+    const mid = (v.pricing.rangeLow + v.pricing.rangeHigh) / 2;
+    if (ap.rules.reduceWhenStale.enabled && v.daysOnLot >= ap.rules.reduceWhenStale.daysThreshold) {
+      const maxReduction = v.price * (ap.rules.reduceWhenStale.maxReductionPct / 100);
+      const targetReduction = Math.min(maxReduction, ap.rules.maxAdjustPerWeek, Math.max(0, v.price - mid));
+      if (targetReduction > 100) {
+        const newPrice = Math.round((v.price - targetReduction) / 100) * 100;
+        ap.history.unshift({ when: now, vehicle: `${v.year} ${v.vehicle}`, action: 'reduce', amount: v.price - newPrice, reason: `Stale ${v.daysOnLot}d → −${ap.rules.reduceWhenStale.maxReductionPct}% cap` });
+        v.price = newPrice;
+        applied++;
+      }
+    }
+    if (ap.rules.raiseWhenUnder.enabled && v.price < v.pricing.rangeLow) {
+      const target = Math.min(mid, v.price + ap.rules.maxAdjustPerWeek);
+      const newPrice = Math.round(target / 100) * 100;
+      if (newPrice > v.price + 100) {
+        ap.history.unshift({ when: now, vehicle: `${v.year} ${v.vehicle}`, action: 'raise', amount: newPrice - v.price, reason: 'Underpriced vs. market' });
+        v.price = newPrice;
+        applied++;
+      }
+    }
+  });
+  saveState();
+  refreshPricingTab();
+  toast(`Auto-pricing applied · ${applied} ${applied === 1 ? 'adjustment' : 'adjustments'}`);
+}
+
+function refreshPricingTab() {
+  const root = document.getElementById('page-root');
+  root.innerHTML = renderPricingBucket();
+  bindPricingBucketEvents();
 }
 
 function renderIntegrationsPage() {
