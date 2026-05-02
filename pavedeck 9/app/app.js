@@ -157,7 +157,9 @@ function saveState() {
       loggedIn: state.loggedIn,
       user: state.user,
       inventory: state.inventory,
-      config: state.config
+      config: state.config,
+      photoEdits: state.photoEdits || {},
+      photosUI: state.photosUI || {}
     }));
   } catch (e) {
     console.warn('Failed to save state', e);
@@ -270,7 +272,8 @@ function render() {
     });
   } else if (state.route.name === 'photos') {
     crumb.innerHTML = '<span class="crumb-current">Photos</span>';
-    root.innerHTML = renderSimplePage('Photos', 'Bulk photo enhancement queue. Manage your photo configuration and apply to all vehicles at once.');
+    root.innerHTML = renderPhotosBucket();
+    bindPhotosBucketEvents();
   } else if (state.route.name === 'vdps') {
     crumb.innerHTML = '<span class="crumb-current">VDPs</span>';
     root.innerHTML = renderSimplePage('VDPs', 'AI-generated vehicle description pages. Configure dealership voice and review per-channel output.');
@@ -928,6 +931,578 @@ function renderSimplePage(title, sub) {
       </div>
     </div>
   `;
+}
+
+// ============================================
+// PHOTOS BUCKET — bulk queue + per-image agentic editor
+// ============================================
+
+// Persistent per-photo state lives under state.photoEdits keyed by `${vid}:${idx}`
+function ensurePhotoState() {
+  if (!state.photoEdits) state.photoEdits = {};
+  if (!state.photosUI) state.photosUI = { selected: null, filter: 'all' };
+}
+
+const PHOTO_ACTIONS = [
+  { id: 'remove-bg',   label: 'Remove background', desc: 'Cut subject from existing backdrop',     duration: 1400 },
+  { id: 'replace-bg',  label: 'Replace backdrop',  desc: 'Apply your configured studio backdrop',  duration: 1800 },
+  { id: 'color-fix',   label: 'Color correct',     desc: 'Auto white balance + exposure',          duration: 900 },
+  { id: 'remove-plate',label: 'Blur license plate',desc: 'Privacy-safe plate detection',           duration: 1100 },
+  { id: 'watermark',   label: 'Apply watermark',   desc: 'Bottom-right brand mark',                duration: 600 },
+  { id: 'crop-frame',  label: 'Standardize framing', desc: 'Center vehicle, 16:9 aspect',          duration: 1000 },
+];
+
+function getPhotoQueue() {
+  // Build a queue of photo work items across the whole inventory
+  const queue = [];
+  state.inventory.forEach(v => {
+    const recommended = 8;
+    const have = v.photos || 0;
+    const status = !v.photoUrl ? 'missing'
+                 : have < 4 ? 'low'
+                 : have < recommended ? 'partial'
+                 : 'done';
+    queue.push({
+      vid: v.id, year: v.year, vehicle: v.vehicle, photoUrl: v.photoUrl,
+      have, recommended, status, days: v.daysOnLot,
+    });
+  });
+  return queue;
+}
+
+function renderPhotosBucket() {
+  ensurePhotoState();
+  const queue = getPhotoQueue();
+  const counts = {
+    all: queue.length,
+    missing: queue.filter(q => q.status === 'missing').length,
+    low: queue.filter(q => q.status === 'low').length,
+    partial: queue.filter(q => q.status === 'partial').length,
+    done: queue.filter(q => q.status === 'done').length,
+  };
+  const filter = state.photosUI.filter || 'all';
+  const filtered = filter === 'all' ? queue : queue.filter(q => q.status === filter);
+
+  // Total photos slated for processing
+  const totalNeeded = queue.reduce((acc, q) => acc + Math.max(0, q.recommended - q.have), 0);
+
+  return `
+    <div class="page">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Photos</div>
+          <div class="page-sub">Bulk photo workflow across your inventory. Edit any image with agentic AI actions.</div>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-ghost btn-sm" id="photos-bulk-presets">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            Batch presets
+          </button>
+          <button class="btn btn-primary btn-sm" id="photos-run-all">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Enhance all queued
+          </button>
+        </div>
+      </div>
+
+      <div class="ph-stats">
+        <div class="ph-stat">
+          <div class="ph-stat-label">Photos in queue</div>
+          <div class="ph-stat-num">${totalNeeded}</div>
+          <div class="ph-stat-sub">Across ${queue.length} VINs</div>
+        </div>
+        <div class="ph-stat">
+          <div class="ph-stat-label">Missing all photos</div>
+          <div class="ph-stat-num" style="color: var(--warn);">${counts.missing}</div>
+          <div class="ph-stat-sub">VINs with zero hero shot</div>
+        </div>
+        <div class="ph-stat">
+          <div class="ph-stat-label">Below 4 photos</div>
+          <div class="ph-stat-num" style="color: var(--warn);">${counts.low}</div>
+          <div class="ph-stat-sub">VINs at conversion risk</div>
+        </div>
+        <div class="ph-stat">
+          <div class="ph-stat-label">Avg processing time</div>
+          <div class="ph-stat-num">~4.2<span class="ph-stat-suffix">s</span></div>
+          <div class="ph-stat-sub">Per photo, full pipeline</div>
+        </div>
+      </div>
+
+      <div class="ph-filters">
+        ${['all','missing','low','partial','done'].map(f => `
+          <button class="filter-pill ${f === filter ? 'active' : ''}" data-ph-filter="${f}">
+            ${f === 'all' ? 'All' : f.charAt(0).toUpperCase() + f.slice(1)}
+            <span class="pill-count">${counts[f] || 0}</span>
+          </button>
+        `).join('')}
+      </div>
+
+      <div class="ph-grid">
+        ${filtered.map(q => renderPhotoQueueCard(q)).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderPhotoQueueCard(q) {
+  const editsForVin = Object.keys(state.photoEdits || {}).filter(k => k.startsWith(q.vid + ':')).length;
+  const statusLabel = {
+    missing: { txt: 'No photos', cls: 'st-warn' },
+    low:     { txt: q.have + ' / ' + q.recommended, cls: 'st-warn' },
+    partial: { txt: q.have + ' / ' + q.recommended, cls: 'st-mid' },
+    done:    { txt: q.have + ' / ' + q.recommended + ' · done', cls: 'st-good' },
+  }[q.status];
+
+  return `
+    <div class="ph-card" data-vid="${q.vid}">
+      <div class="ph-card-thumb" ${q.photoUrl ? `style="background-image: url('${q.photoUrl}'), linear-gradient(135deg, #ECE7DF, #D6CFC2); background-size: cover, auto;"` : 'style="background: linear-gradient(135deg, #ECE7DF, #D6CFC2);"'}>
+        ${editsForVin > 0 ? `<div class="ph-card-badge"><span class="dot"></span>${editsForVin} edited</div>` : ''}
+      </div>
+      <div class="ph-card-body">
+        <div class="ph-card-title">${escapeHtml(q.year + ' ' + q.vehicle)}</div>
+        <div class="ph-card-meta">
+          <span class="status-pill ${statusLabel.cls}">${statusLabel.txt}</span>
+          <span class="ph-card-days">${q.days}d on lot</span>
+        </div>
+      </div>
+      <div class="ph-card-actions">
+        <button class="btn btn-ghost btn-xs" data-action="open-editor" data-vid="${q.vid}">
+          Open editor →
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderPhotoEditor(vid) {
+  const v = state.inventory.find(x => x.id === vid);
+  if (!v) return '';
+  const recommended = 8;
+  const tiles = Array.from({ length: recommended }, (_, i) => ({ idx: i, vid: v.id }));
+  const selectedKey = state.photosUI.selected;
+  const selectedTile = selectedKey && selectedKey.startsWith(vid + ':')
+    ? parseInt(selectedKey.split(':')[1]) : 0;
+
+  return `
+    <div class="ph-editor-overlay" id="ph-editor-overlay">
+      <div class="ph-editor">
+        <div class="ph-editor-head">
+          <div>
+            <div class="ph-editor-title">${escapeHtml(v.year + ' ' + v.vehicle)}</div>
+            <div class="ph-editor-sub">VIN ${escapeHtml(v.vin)} · Photo editor</div>
+          </div>
+          <button class="icon-btn" id="ph-editor-close" title="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div class="ph-editor-body">
+          <!-- LEFT: thumbnail rail -->
+          <div class="ph-rail">
+            <div class="ph-rail-label">Photos · ${tiles.length}</div>
+            ${tiles.map(t => {
+              const k = `${t.vid}:${t.idx}`;
+              const ed = state.photoEdits[k];
+              const active = t.idx === selectedTile;
+              const heroBadge = t.idx === 0 ? '<div class="rail-tag">HERO</div>' : '';
+              const editsBadge = ed && ed.applied && ed.applied.length
+                ? `<div class="rail-edits">${ed.applied.length}</div>` : '';
+              const bg = ed && ed.bg ? ed.bg : 'linear-gradient(135deg, #ECE7DF, #D6CFC2)';
+              return `
+                <button class="ph-rail-tile ${active ? 'active' : ''}" data-tile="${t.idx}" style="background: ${bg};">
+                  ${heroBadge}
+                  ${editsBadge}
+                </button>
+              `;
+            }).join('')}
+            <button class="ph-rail-tile ph-rail-add" id="ph-add-photo">+</button>
+          </div>
+
+          <!-- CENTER: canvas -->
+          <div class="ph-canvas">
+            ${renderPhotoCanvas(v, selectedTile)}
+          </div>
+
+          <!-- RIGHT: actions panel -->
+          <div class="ph-actions">
+            <div class="ph-actions-section">
+              <div class="ph-section-label">Agentic actions</div>
+              ${PHOTO_ACTIONS.map(a => {
+                const k = `${v.id}:${selectedTile}`;
+                const ed = state.photoEdits[k];
+                const isApplied = ed && ed.applied && ed.applied.includes(a.id);
+                return `
+                  <button class="ph-action ${isApplied ? 'applied' : ''}" data-action-id="${a.id}">
+                    <div class="ph-action-icon">
+                      ${isApplied
+                        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>'
+                        : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>'
+                      }
+                    </div>
+                    <div class="ph-action-text">
+                      <div class="ph-action-label">${a.label}</div>
+                      <div class="ph-action-desc">${a.desc}</div>
+                    </div>
+                    <div class="ph-action-status">
+                      ${isApplied ? '<span class="ph-applied-tag">Applied</span>' : `<span class="ph-time">~${(a.duration/1000).toFixed(1)}s</span>`}
+                    </div>
+                  </button>
+                `;
+              }).join('')}
+            </div>
+
+            <div class="ph-actions-section">
+              <div class="ph-section-label">Run pipeline</div>
+              <button class="btn btn-primary btn-sm ph-run-all" id="ph-run-pipeline">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Run all 6 actions
+              </button>
+              <button class="btn btn-ghost btn-sm" id="ph-reset-edits">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+                Reset this photo
+              </button>
+            </div>
+
+            <div class="ph-actions-section">
+              <div class="ph-section-label">Apply to all photos for this VIN</div>
+              <button class="btn btn-ghost btn-sm" id="ph-apply-all-tiles">
+                Use this preset on all 8
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="ph-status-bar" id="ph-status-bar">
+          <span class="ph-status-text">Ready</span>
+          <span class="ph-status-meta">localStorage · auto-saved</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPhotoCanvas(v, idx) {
+  const k = `${v.id}:${idx}`;
+  const ed = state.photoEdits[k] || { applied: [], bg: null };
+  const beforeBg = 'linear-gradient(135deg, #C8C2B5 0%, #A8A29E 100%)';
+  const afterBg = ed.bg || beforeBg;
+  const hasEdits = ed.applied && ed.applied.length > 0;
+
+  return `
+    <div class="ph-canvas-inner">
+      <div class="ph-canvas-head">
+        <div class="ph-canvas-title">Photo ${idx + 1}${idx === 0 ? ' · Hero' : ''}</div>
+        <div class="ph-canvas-meta">${ed.applied ? ed.applied.length : 0} of 6 actions applied</div>
+      </div>
+
+      <div class="ph-compare">
+        <div class="ph-compare-cell">
+          <div class="ph-compare-label">Before</div>
+          <div class="ph-compare-image" style="background: ${beforeBg};">
+            ${v.photoUrl ? `<img src="${v.photoUrl}" alt="" onerror="this.style.display='none';" />` : ''}
+            <div class="ph-vehicle-silhouette ${hasEdits ? 'before' : ''}">${vehicleSilhouetteSvg('#3a3835')}</div>
+          </div>
+        </div>
+        <div class="ph-compare-cell">
+          <div class="ph-compare-label">After ${hasEdits ? `· ${ed.applied.length} edits` : '· no edits yet'}</div>
+          <div class="ph-compare-image" style="background: ${afterBg};">
+            <div class="ph-vehicle-silhouette after">${vehicleSilhouetteSvg('#1a1816')}</div>
+            ${ed.applied && ed.applied.includes('watermark') ? `<div class="ph-watermark">${escapeHtml(state.config.watermark || 'PD')}</div>` : ''}
+            ${ed.applied && ed.applied.includes('crop-frame') ? '<div class="ph-frame-guide"></div>' : ''}
+          </div>
+        </div>
+      </div>
+
+      <div class="ph-applied-list">
+        ${ed.applied && ed.applied.length ? ed.applied.map(aid => {
+          const a = PHOTO_ACTIONS.find(x => x.id === aid);
+          return `<span class="ph-applied-chip">${a ? a.label : aid}</span>`;
+        }).join('') : '<span class="ph-applied-empty">No actions applied yet — run an action from the right panel.</span>'}
+      </div>
+    </div>
+  `;
+}
+
+// Reusable car silhouette for canvas
+function vehicleSilhouetteSvg(color) {
+  return `<svg viewBox="0 0 320 140" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYEnd meet">
+    <ellipse cx="160" cy="125" rx="140" ry="6" fill="rgba(0,0,0,0.18)"/>
+    <path d="M40 95 Q40 60 80 50 L130 38 Q160 28 200 32 L240 38 Q280 50 290 75 L295 95 Q295 105 285 105 L265 105 Q260 90 245 90 Q230 90 225 105 L120 105 Q115 90 100 90 Q85 90 80 105 L55 105 Q40 105 40 95 Z" fill="${color}"/>
+    <path d="M115 50 L195 42 Q215 42 225 60 L235 78 L100 78 Q100 60 115 50 Z" fill="rgba(255,255,255,0.18)" stroke="${color}" stroke-width="0.5"/>
+    <line x1="167" y1="44" x2="167" y2="78" stroke="${color}" stroke-width="1.2"/>
+    <circle cx="100" cy="105" r="14" fill="#0c0a09"/>
+    <circle cx="100" cy="105" r="6" fill="#444"/>
+    <circle cx="245" cy="105" r="14" fill="#0c0a09"/>
+    <circle cx="245" cy="105" r="6" fill="#444"/>
+  </svg>`;
+}
+
+function bindPhotosBucketEvents() {
+  // Filter pills
+  document.querySelectorAll('[data-ph-filter]').forEach(b => {
+    b.addEventListener('click', () => {
+      state.photosUI.filter = b.dataset.phFilter;
+      saveState();
+      const root = document.getElementById('page-root');
+      root.innerHTML = renderPhotosBucket();
+      bindPhotosBucketEvents();
+    });
+  });
+
+  // Open editor on card click or button
+  document.querySelectorAll('.ph-card').forEach(card => {
+    card.addEventListener('click', (e) => {
+      // Avoid double-firing if button inside also clicked
+      const vid = card.dataset.vid;
+      openPhotoEditor(vid);
+    });
+  });
+
+  // Bulk: enhance all queued
+  document.getElementById('photos-run-all')?.addEventListener('click', () => {
+    runEnhanceAll();
+  });
+
+  // Batch presets — placeholder toast for now
+  document.getElementById('photos-bulk-presets')?.addEventListener('click', () => {
+    toast('Batch presets — coming with v2');
+  });
+}
+
+function openPhotoEditor(vid) {
+  ensurePhotoState();
+  state.photosUI.selected = `${vid}:0`;
+  saveState();
+  // Inject overlay into body
+  const existing = document.getElementById('ph-editor-overlay');
+  if (existing) existing.remove();
+  const wrap = document.createElement('div');
+  wrap.innerHTML = renderPhotoEditor(vid);
+  document.body.appendChild(wrap.firstElementChild);
+  bindPhotoEditorEvents(vid);
+}
+
+function bindPhotoEditorEvents(vid) {
+  const overlay = document.getElementById('ph-editor-overlay');
+
+  // Close
+  document.getElementById('ph-editor-close')?.addEventListener('click', closePhotoEditor);
+  overlay?.addEventListener('click', (e) => {
+    if (e.target.id === 'ph-editor-overlay') closePhotoEditor();
+  });
+
+  // Tile selection
+  document.querySelectorAll('.ph-rail-tile[data-tile]').forEach(t => {
+    t.addEventListener('click', () => {
+      const idx = parseInt(t.dataset.tile);
+      state.photosUI.selected = `${vid}:${idx}`;
+      saveState();
+      refreshPhotoEditor(vid);
+    });
+  });
+
+  // Action buttons — apply single action with simulated agentic flow
+  document.querySelectorAll('.ph-action[data-action-id]').forEach(b => {
+    b.addEventListener('click', () => {
+      const aid = b.dataset.actionId;
+      const idx = parseInt(state.photosUI.selected.split(':')[1]);
+      runPhotoAction(vid, idx, aid);
+    });
+  });
+
+  // Run full pipeline
+  document.getElementById('ph-run-pipeline')?.addEventListener('click', () => {
+    const idx = parseInt(state.photosUI.selected.split(':')[1]);
+    runPhotoPipeline(vid, idx);
+  });
+
+  // Reset
+  document.getElementById('ph-reset-edits')?.addEventListener('click', () => {
+    const idx = parseInt(state.photosUI.selected.split(':')[1]);
+    delete state.photoEdits[`${vid}:${idx}`];
+    saveState();
+    refreshPhotoEditor(vid);
+    setStatusBar('Reset', 'Photo restored to original state');
+  });
+
+  // Apply preset to all 8 tiles
+  document.getElementById('ph-apply-all-tiles')?.addEventListener('click', () => {
+    const idx = parseInt(state.photosUI.selected.split(':')[1]);
+    const source = state.photoEdits[`${vid}:${idx}`];
+    if (!source || !source.applied || !source.applied.length) {
+      toast('Apply at least one action first');
+      return;
+    }
+    for (let i = 0; i < 8; i++) {
+      state.photoEdits[`${vid}:${i}`] = JSON.parse(JSON.stringify(source));
+    }
+    saveState();
+    refreshPhotoEditor(vid);
+    setStatusBar('Applied to 8 photos', `Preset copied across all tiles for this VIN`);
+  });
+}
+
+function refreshPhotoEditor(vid) {
+  const overlay = document.getElementById('ph-editor-overlay');
+  if (!overlay) return;
+  const idx = parseInt(state.photosUI.selected.split(':')[1]);
+  const canvas = overlay.querySelector('.ph-canvas');
+  const actions = overlay.querySelector('.ph-actions');
+  const v = state.inventory.find(x => x.id === vid);
+  if (canvas) canvas.innerHTML = renderPhotoCanvas(v, idx);
+  // Re-render rail tiles to reflect new edits
+  overlay.querySelectorAll('.ph-rail-tile[data-tile]').forEach(t => {
+    const i = parseInt(t.dataset.tile);
+    const k = `${vid}:${i}`;
+    const ed = state.photoEdits[k];
+    t.classList.toggle('active', i === idx);
+    const bg = ed && ed.bg ? ed.bg : 'linear-gradient(135deg, #ECE7DF, #D6CFC2)';
+    t.style.background = bg;
+    // Update edits badge
+    let badge = t.querySelector('.rail-edits');
+    const cnt = ed && ed.applied ? ed.applied.length : 0;
+    if (cnt > 0) {
+      if (!badge) {
+        badge = document.createElement('div');
+        badge.className = 'rail-edits';
+        t.appendChild(badge);
+      }
+      badge.textContent = cnt;
+    } else if (badge) {
+      badge.remove();
+    }
+  });
+  // Re-render action panel
+  if (actions) {
+    const editor = renderPhotoEditor(vid);
+    const wrap = document.createElement('div');
+    wrap.innerHTML = editor;
+    const newActions = wrap.querySelector('.ph-actions');
+    actions.replaceWith(newActions);
+    bindPhotoEditorEvents(vid);
+  }
+}
+
+function runPhotoAction(vid, idx, aid) {
+  ensurePhotoState();
+  const k = `${vid}:${idx}`;
+  if (!state.photoEdits[k]) state.photoEdits[k] = { applied: [], bg: null };
+  const ed = state.photoEdits[k];
+
+  const action = PHOTO_ACTIONS.find(a => a.id === aid);
+  if (!action) return;
+
+  if (ed.applied.includes(aid)) {
+    toast(action.label + ' — already applied');
+    return;
+  }
+
+  setStatusBar('Running', `${action.label}…`, true);
+
+  // Simulate agentic processing
+  setTimeout(() => {
+    ed.applied.push(aid);
+    // Apply visual side-effects to the canvas state
+    if (aid === 'replace-bg') {
+      const backdrop = state.config.backdrop || 'cream';
+      ed.bg = backdropToGradient(backdrop);
+    } else if (aid === 'color-fix' && !ed.bg) {
+      ed.bg = 'linear-gradient(135deg, #F5F2ED 0%, #E8E2D5 100%)';
+    } else if (aid === 'remove-bg' && !ed.bg) {
+      ed.bg = 'linear-gradient(135deg, #FFFFFF 0%, #F5F5F5 100%)';
+    }
+    saveState();
+    refreshPhotoEditor(vid);
+    setStatusBar('Done', `${action.label} applied`);
+  }, action.duration);
+}
+
+function runPhotoPipeline(vid, idx) {
+  ensurePhotoState();
+  const k = `${vid}:${idx}`;
+  state.photoEdits[k] = { applied: [], bg: null };
+  saveState();
+  refreshPhotoEditor(vid);
+
+  let i = 0;
+  const next = () => {
+    if (i >= PHOTO_ACTIONS.length) {
+      setStatusBar('Complete', `All 6 actions applied — saved to localStorage`);
+      return;
+    }
+    const a = PHOTO_ACTIONS[i];
+    setStatusBar('Running', `Step ${i+1} of 6 · ${a.label}…`, true);
+    setTimeout(() => {
+      const ed = state.photoEdits[k];
+      ed.applied.push(a.id);
+      if (a.id === 'replace-bg') ed.bg = backdropToGradient(state.config.backdrop || 'cream');
+      else if (a.id === 'color-fix' && !ed.bg) ed.bg = 'linear-gradient(135deg, #F5F2ED 0%, #E8E2D5 100%)';
+      else if (a.id === 'remove-bg' && !ed.bg) ed.bg = 'linear-gradient(135deg, #FFFFFF 0%, #F5F5F5 100%)';
+      saveState();
+      refreshPhotoEditor(vid);
+      i++;
+      next();
+    }, Math.min(a.duration, 700)); // pipeline is faster than individual
+  };
+  next();
+}
+
+function runEnhanceAll() {
+  const queue = getPhotoQueue().filter(q => q.status !== 'done');
+  if (queue.length === 0) {
+    toast('Nothing in queue — all VINs done');
+    return;
+  }
+  toast(`Queued ${queue.length} VINs for enhancement…`);
+  let done = 0;
+  queue.forEach((q, i) => {
+    setTimeout(() => {
+      // Auto-enhance hero photo (idx 0) for each
+      const k = `${q.vid}:0`;
+      state.photoEdits[k] = {
+        applied: PHOTO_ACTIONS.map(a => a.id),
+        bg: backdropToGradient(state.config.backdrop || 'cream'),
+      };
+      done++;
+      if (done === queue.length) {
+        saveState();
+        // Refresh the bucket view
+        if (state.route.name === 'photos') {
+          document.getElementById('page-root').innerHTML = renderPhotosBucket();
+          bindPhotosBucketEvents();
+        }
+        toast(`Enhanced ${queue.length} hero photos`);
+      }
+    }, i * 80);
+  });
+}
+
+function backdropToGradient(name) {
+  const map = {
+    cream:    'linear-gradient(135deg, #F5F2ED 0%, #E5DFD2 100%)',
+    white:    'linear-gradient(135deg, #FFFFFF 0%, #F0F0F0 100%)',
+    gradient: 'linear-gradient(135deg, #E8E0F5 0%, #C8BEE5 100%)',
+    showroom: 'linear-gradient(180deg, #2A2825 0%, #4A4540 60%, #6A625A 100%)',
+  };
+  return map[name] || map.cream;
+}
+
+function setStatusBar(state_, text, working) {
+  const bar = document.getElementById('ph-status-bar');
+  if (!bar) return;
+  bar.querySelector('.ph-status-text').innerHTML =
+    (working ? '<span class="ph-status-spinner"></span> ' : '') +
+    `<strong>${escapeHtml(state_)}</strong> · ${escapeHtml(text)}`;
+}
+
+function closePhotoEditor() {
+  const overlay = document.getElementById('ph-editor-overlay');
+  if (overlay) overlay.remove();
+  // Refresh queue cards (edit counts may have changed)
+  if (state.route.name === 'photos') {
+    document.getElementById('page-root').innerHTML = renderPhotosBucket();
+    bindPhotosBucketEvents();
+  }
 }
 
 function renderIntegrationsPage() {
