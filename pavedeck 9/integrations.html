@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Integrations — Pavedeck</title>
+<meta name="description" content="Pavedeck plugs into the dealer stack you already run. Inventory management, DMS, website, syndication — keep what you have, get better content flowing through it.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header-inner">
+    <a href="index.html" class="brand">
+      <svg class="mark" viewBox="0 0 28 28" aria-hidden="true">
+        <rect x="2" y="14" width="18" height="11" rx="1.5" fill="none" stroke="#0C0A09" stroke-width="1.5"/>
+        <rect x="5" y="11" width="18" height="11" rx="1.5" fill="none" stroke="#0C0A09" stroke-width="1.5"/>
+        <rect class="top-card" x="8" y="8" width="18" height="11" rx="1.5" fill="#C2410C" stroke="#0C0A09" stroke-width="1.5"/>
+      </svg>
+      <span class="wordmark">Pavedeck</span>
+    </a>
+    <nav class="nav">
+      <a href="product.html" class="nav-link">Product</a>
+      <a href="integrations.html" class="nav-link active">Integrations</a>
+      <a href="pricing.html" class="nav-link">Pricing</a>
+      <a href="app/" class="nav-link">Try it</a>
+      <a href="about.html" class="nav-link">About</a>
+      <a href="app/" class="btn btn-primary">Try free <span class="arrow">→</span></a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-eyebrow eyebrow fade-in">Integrations</div>
+    <h1 class="fade-in delay-1">Plugs into the stack you already&nbsp;run.</h1>
+    <p class="lede fade-in delay-2">Pavedeck is a layer, not a platform replacement. We read inventory from where it lives. We push enhanced content back into the same systems. Nothing in your existing stack changes — the content flowing through it just gets dramatically better.</p>
+  </div>
+</section>
+
+<!-- INVENTORY READ -->
+<section class="section">
+  <div class="container">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow u-mb-4">Reading from your inventory</div>
+        <h2>However your VINs live today, we can read them.</h2>
+      </div>
+      <p class="lede">The independent used car dealer software market is fragmented across a dozen inventory management systems. Pavedeck supports the major ones natively and falls back to CSV / website-scraping for the rest.</p>
+    </div>
+
+    <ul class="surface-list u-mt-6">
+      <li>
+        <div class="surface-name">HomeNet (Cox Automotive)</div>
+        <div class="surface-desc">Native API integration. Inventory pulled in real time. Most franchise dealers and many independents use HomeNet — this is our primary path.</div>
+        <div class="surface-meta">Native</div>
+      </li>
+      <li>
+        <div class="surface-name">vAuto (Cox Automotive)</div>
+        <div class="surface-desc">Native API integration. Read-only — Pavedeck pulls inventory data, vAuto's pricing and stocking workflows stay untouched.</div>
+        <div class="surface-meta">Native</div>
+      </li>
+      <li>
+        <div class="surface-name">DealerCenter</div>
+        <div class="surface-desc">Native integration. The most common DMS+IMS combo for independent used car dealers under 100 vehicles.</div>
+        <div class="surface-meta">Native</div>
+      </li>
+      <li>
+        <div class="surface-name">Frazer</div>
+        <div class="surface-desc">Native integration. Long-standing favorite of small independent dealers; we read directly from the inventory module.</div>
+        <div class="surface-meta">Native</div>
+      </li>
+      <li>
+        <div class="surface-name">AutoManager</div>
+        <div class="surface-desc">Native integration. Common among small-to-mid independents.</div>
+        <div class="surface-meta">Native</div>
+      </li>
+      <li>
+        <div class="surface-name">Max Digital (FirstLook)</div>
+        <div class="surface-desc">Read-only API integration. Pavedeck pulls inventory; Max Digital's other features stay in place.</div>
+        <div class="surface-meta">Native</div>
+      </li>
+      <li>
+        <div class="surface-name">Dealerslink</div>
+        <div class="surface-desc">Read-only API integration. Pavedeck pulls inventory data without disrupting your existing Dealerslink workflows.</div>
+        <div class="surface-meta">Native</div>
+      </li>
+      <li>
+        <div class="surface-name">VinCue</div>
+        <div class="surface-desc">Native API integration. Independent alternative to vAuto with a growing footprint among modern dealers.</div>
+        <div class="surface-meta">Native</div>
+      </li>
+      <li>
+        <div class="surface-name">Other IMS / custom systems</div>
+        <div class="surface-desc">CSV upload (manual or scheduled), or scrape from your dealer website. Slower but works for any setup. Native integration coming if there's customer demand.</div>
+        <div class="surface-meta">Fallback</div>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- PUSHING BACK -->
+<section class="section">
+  <div class="container">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow u-mb-4">Pushing enhanced content back</div>
+        <h2>Where the better content goes.</h2>
+      </div>
+      <p class="lede">Once Pavedeck has produced enhanced photos, sharper VDPs, and pricing recommendations, the content flows back into the systems your customers actually see. We don't bypass your syndicator. We don't replace your website CMS. We hand off better content to the channels you already use.</p>
+    </div>
+
+    <ul class="surface-list u-mt-6">
+      <li>
+        <div class="surface-name">Your dealer website</div>
+        <div class="surface-desc">Dealer.com, DealerOn, fusionZONE, custom WordPress, Shopify-based — Pavedeck pushes enhanced VDPs and photos via API or webhook into your site's inventory data layer.</div>
+        <div class="surface-meta">Push</div>
+      </li>
+      <li>
+        <div class="surface-name">Your inventory management system</div>
+        <div class="surface-desc">Updated photos, VDP copy, and pricing flags push back into HomeNet / vAuto / DealerCenter so your existing syndication workflows pick them up automatically.</div>
+        <div class="surface-meta">Push</div>
+      </li>
+      <li>
+        <div class="surface-name">AutoTrader</div>
+        <div class="surface-desc">Reached via your existing syndication setup. We don't replace your AutoTrader feed — we hand your syndicator better photos and VDP copy.</div>
+        <div class="surface-meta">Indirect</div>
+      </li>
+      <li>
+        <div class="surface-name">Cars.com</div>
+        <div class="surface-desc">Same as AutoTrader: reached via your existing syndicator with enhanced content flowing through.</div>
+        <div class="surface-meta">Indirect</div>
+      </li>
+      <li>
+        <div class="surface-name">CarGurus</div>
+        <div class="surface-desc">Same: indirect via your syndicator. CarGurus IMV pricing data is one of our pricing intelligence inputs.</div>
+        <div class="surface-meta">Indirect</div>
+      </li>
+      <li>
+        <div class="surface-name">Facebook Marketplace</div>
+        <div class="surface-desc">Pavedeck generates Facebook-specific VDP copy variants; Meta's commerce APIs and your existing Facebook integration handle the post.</div>
+        <div class="surface-meta">Indirect</div>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- DATA SOURCES -->
+<section class="section section-deep">
+  <div class="container">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow u-mb-4">Pricing data sources</div>
+        <h2>Licensed data, not scraped.</h2>
+      </div>
+      <p class="lede">Pavedeck's pricing intelligence is built on commercially licensed market data. This matters for legal defensibility and because your used car manager has to defend pricing decisions to ownership.</p>
+    </div>
+
+    <ul class="surface-list u-mt-6" style="border-color: var(--line-deep);">
+      <li style="border-color: var(--line-deep);">
+        <div class="surface-name" style="color: var(--bg);">MarketCheck</div>
+        <div class="surface-desc" style="color: var(--fg-faint);">Live US used vehicle market feed covering ~90% of dealer inventory. Primary source for competitive comps.</div>
+        <div class="surface-meta">Licensed</div>
+      </li>
+      <li style="border-color: var(--line-deep);">
+        <div class="surface-name" style="color: var(--bg);">Black Book</div>
+        <div class="surface-desc" style="color: var(--fg-faint);">Industry-standard wholesale and retail valuations. Our trade-in benchmark and condition-adjusted pricing input.</div>
+        <div class="surface-meta">Licensed</div>
+      </li>
+      <li style="border-color: var(--line-deep);">
+        <div class="surface-name" style="color: var(--bg);">Kelley Blue Book</div>
+        <div class="surface-desc" style="color: var(--fg-faint);">Consumer-facing valuation data. We surface KBB ranges in pricing recommendations because that's what customers cite.</div>
+        <div class="surface-meta">Licensed</div>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-strip">
+  <div class="container">
+    <div class="eyebrow u-mb-6">Don't see your stack?</div>
+    <p class="lede-large u-mb-6">If your DMS, IMS, or website provider isn't listed, the fallback paths still cover you. CSV upload, website scraping, or manual API setup can usually get Pavedeck running on your inventory in under an hour.</p>
+    <div class="cta-strip-actions">
+      <a href="app/" class="btn btn-primary">Try Pavedeck free <span class="arrow">→</span></a>
+      <a href="pricing.html" class="btn btn-secondary">See pricing</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-inner">
+      <div class="brand" style="opacity: 0.7;">
+        <svg class="mark" viewBox="0 0 28 28" aria-hidden="true" style="width: 24px; height: 24px;">
+          <rect x="2" y="14" width="18" height="11" rx="1.5" fill="none" stroke="#0C0A09" stroke-width="1.5"/>
+          <rect x="5" y="11" width="18" height="11" rx="1.5" fill="none" stroke="#0C0A09" stroke-width="1.5"/>
+          <rect x="8" y="8" width="18" height="11" rx="1.5" fill="#C2410C" stroke="#0C0A09" stroke-width="1.5"/>
+        </svg>
+        <span class="wordmark" style="font-size: 14px;">Pavedeck</span>
+      </div>
+      <ul class="footer-links">
+        <li><a href="product.html">Product</a></li>
+        <li><a href="app/">Try it</a></li>
+        <li><a href="integrations.html">Integrations</a></li>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a href="about.html">About</a></li>
+      </ul>
+      <div style="font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; color: var(--fg-muted);">© 2026 Pavedeck</div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
